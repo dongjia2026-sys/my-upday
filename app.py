@@ -4,11 +4,12 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import google.generativeai as genai
+import requests
 from datetime import datetime
 
 # ================= 页面基础设置 =================
 st.set_page_config(
-    page_title="AI 智能股票盯盘与通知参谋",
+    page_title="AI 智能股票盯盘与安卓通知参谋",
     page_icon="🧭",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -22,11 +23,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 侧边栏：多市场自选与推送设置 =================
-st.sidebar.title("🧭 智能盯盘与通知控制台")
-st.sidebar.markdown("覆盖美股 AI 巨头、太空探索及 A 股算力产业链。")
+# ================= 侧边栏：多市场自选与安卓推送设置 =================
+st.sidebar.title("🧭 智能盯盘与安卓通知控制台")
+st.sidebar.markdown("专为安卓用户打造的美股/A股双市场盯盘参谋。")
 
-# 市场分类预设
 market_type = st.sidebar.radio("🌐 选择市场区域：", ["美股大盘与 AI 巨头", "A 股 AI 算力/产业链", "🔍 手动输入自定义代码"])
 
 if market_type == "美股大盘与 AI 巨头":
@@ -37,8 +37,7 @@ if market_type == "美股大盘与 AI 巨头":
         "MU (美光科技 - 内存芯片)": "MU",
         "SPY (标普500美股大盘)": "SPY"
     }
-    selected_label = st.sidebar.selectbox("选择美股标的：", options=list(us_watchlist.keys()))
-    ticker_symbol = us_watchlist[selected_label]
+    ticker_symbol = us_watchlist[st.sidebar.selectbox("选择美股标的：", options=list(us_watchlist.keys()))]
 elif market_type == "A 股 AI 算力/产业链":
     cn_watchlist = {
         "工业富联 (601138.SS - 算力服务器代工)": "601138.SS",
@@ -46,20 +45,18 @@ elif market_type == "A 股 AI 算力/产业链":
         "新易盛 (300502.SZ - 高速光模块)": "300502.SZ",
         "寒武纪 (688256.SS - 国产AI芯片)": "688256.SS"
     }
-    selected_label = st.sidebar.selectbox("选择 A 股标的：", options=list(cn_watchlist.keys()))
-    ticker_symbol = cn_watchlist[selected_label]
+    ticker_symbol = cn_watchlist[st.sidebar.selectbox("选择 A 股标的：", options=list(cn_watchlist.keys()))]
 else:
     ticker_symbol = st.sidebar.text_input("请输入股票代码（美股如 AAPL，A股如 000001.SZ）：", value="AAPL").upper().strip()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("📱 手机通知栏提醒配置（选填）")
-enable_notification = st.sidebar.checkbox("开启买点触发时发送手机通知")
-push_channel = st.sidebar.selectbox("选择通知通道", ["Bark (苹果/安卓弹窗)", "Server酱 (微信通知)"])
-push_key = st.sidebar.text_input("填入你的推送 Key / Token：", type="password", help="填写后，当股价触及买点，系统可向你手机主动弹窗。")
+st.sidebar.subheader("📱 安卓手机通知栏推送配置")
+enable_push = st.sidebar.checkbox("开启买点触发时微信/手机弹窗提醒")
+serverchan_key = st.sidebar.text_input("填入 Server酱 SendKey (微信接收)：", type="password", help="免费注册 Server酱(sct.ftqq.com)，复制SendKey填入此处，买点触发时微信直接弹窗。")
 
-gemini_api_key = st.sidebar.text_input("Gemini API Key (选填-用于AI新闻翻译)：", type="password")
+gemini_api_key = st.sidebar.text_input("Gemini API Key (选填-新闻翻译)：", type="password")
 
-# ================= 核心数据抓取与技术指标计算 =================
+# ================= 核心数据抓取与计算函数 =================
 @st.cache_data(ttl=900)
 def fetch_stock_data(symbol):
     ticker = yf.Ticker(symbol)
@@ -100,15 +97,27 @@ def calculate_indicators(df):
     data["RSI"] = data["RSI"].fillna(50)
     return data
 
+# 发送微信/手机通知的函数
+def send_android_push(key, title, desp):
+    if not key:
+        return False
+    url = f"https://sctapi.ftqq.com/{key}.send"
+    data = {"title": title, "desp": desp}
+    try:
+        res = requests.post(url, data=data, timeout=5)
+        return res.status_code == 200
+    except Exception:
+        return False
+
 # ================= 主界面渲染 =================
 st.title(f"📊 全球AI巨头与算力链自动体检报告：{ticker_symbol}")
-st.caption(f"数据更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')} | 覆盖美股盘后及A股底层行情")
+st.caption(f"数据更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M')} | 适配安卓手机实时盯盘")
 
-with st.spinner(f"正在深度扫描 {ticker_symbol} 的均线支撑、机构底牌与产业链动态..."):
+with st.spinner(f"正在扫描 {ticker_symbol} 行情与支撑位..."):
     hist, info, news_titles = fetch_stock_data(ticker_symbol)
 
 if hist is None or hist.empty or len(hist) < 5:
-    st.error(f"⚠️ 未能找到代码为 `{ticker_symbol}` 的足够交易数据，请检查拼写或市场后缀是否正确。")
+    st.error(f"⚠️ 未能找到代码为 `{ticker_symbol}` 的数据，请检查拼写。")
     st.stop()
 
 df = calculate_indicators(hist)
@@ -132,11 +141,9 @@ drawdown_from_high = ((current_price - high_52w) / high_52w) * 100
 
 target_mean = info.get("targetMeanPrice")
 target_low = info.get("targetLowPrice")
-target_high = info.get("targetHighPrice")
-pe_ratio = info.get("trailingPE") or info.get("forwardPE")
 short_name = info.get("shortName") or info.get("longName") or ticker_symbol
 
-# ================= 测算买点区间 =================
+# 测算买点
 support_candidates_1 = [val for val in [bb_lower, low_20d, min(sma20, sma50)] if val < current_price]
 buy_zone_1_mid = np.median(support_candidates_1) if support_candidates_1 else current_price * 0.94
 buy_zone_1_low = round(buy_zone_1_mid * 0.985, 2)
@@ -150,22 +157,22 @@ buy_zone_2_mid = np.median(valid_s2) if valid_s2 else buy_zone_1_low * 0.88
 buy_zone_2_low = round(buy_zone_2_mid * 0.98, 2)
 buy_zone_2_high = round(buy_zone_2_mid * 1.02, 2)
 
-# ================= 决策引擎 =================
+# 决策与通知触发
 score = 0
 if current_price >= sma20 and sma20 >= sma50:
-    trend_status = "📈 处于强势上涨通道"
+    trend_status = "📈 强势上涨通道"
     score += 1
 elif current_price < sma20 and current_price < sma50:
-    trend_status = "📉 处于短期调整下行通道"
+    trend_status = "📉 短期调整下行"
     score -= 1
 else:
-    trend_status = "〰️ 处于横盘震荡期"
+    trend_status = "〰️ 横盘震荡期"
 
 if rsi < 35:
-    rsi_status = f"🥶 极度超卖（RSI={rsi:.1f}）：恐慌情绪释放，接近短期低吸点"
+    rsi_status = f"🥶 极度超卖（RSI={rsi:.1f}）"
     score += 2
 elif rsi > 70:
-    rsi_status = f"🥵 严重过热（RSI={rsi:.1f}）：短期追高风险较大"
+    rsi_status = f"🥵 严重过热（RSI={rsi:.1f}）"
     score -= 2
 else:
     rsi_status = f"😊 情绪平稳（RSI={rsi:.1f}）"
@@ -174,7 +181,14 @@ if score >= 1 and rsi <= 65:
     signal_color = "#dcfce7"
     border_color = "#16a34a"
     signal_title = "🟢 今日结论：进入第一买点区，可分批低吸"
-    signal_summary = f"当前价格 **${current_price:.2f}**，契合短期支撑。建议在 **${buy_zone_1_low} - ${buy_zone_1_high}** 附近分批建立底仓。"
+    signal_summary = f"当前价格 **${current_price:.2f}**，契合短期支撑。建议在 **${buy_zone_1_low} - ${buy_zone_1_high}** 附近分批建仓。"
+    
+    # 如果开启了推送且当前价格刚好掉进买点区，自动发微信通知到安卓手机
+    if enable_push and serverchan_key and current_price <= buy_zone_1_high:
+        push_title = f"【盯盘买点触发】{short_name} ({ticker_symbol})"
+        push_content = f"当前价格: ${current_price:.2f}\n建议买入区间: ${buy_zone_1_low} - ${buy_zone_1_high}\n状态: 已进入第一买点支撑区，请及时查看！"
+        send_android_push(serverchan_key, push_title, push_content)
+
 elif rsi > 70:
     signal_color = "#fee2e2"
     border_color = "#dc2626"
@@ -186,7 +200,7 @@ else:
     signal_title = "🟡 今日结论：多看少动，等待落入安全防线"
     signal_summary = f"当前价格 **${current_price:.2f}** 正在震荡，等待触及下方的安全买点区再行动。"
 
-# 渲染顶部红绿灯
+# 渲染页面
 st.markdown(f"""
 <div class="signal-box" style="background-color: {signal_color}; border-left: 8px solid {border_color};">
     <h3 style="margin-top:0; color:#111827;">{signal_title}</h3>
@@ -194,7 +208,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 指标卡片
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("💰 最新价格", f"${current_price:.2f}", f"{daily_change_pct:+.2f}%")
@@ -210,36 +223,32 @@ with col4:
 
 st.markdown("---")
 
-# 挂单区间
 st.subheader("🎯 系统自动测算挂单买入区")
 z_col1, z_col2 = st.columns(2)
 with z_col1:
     st.markdown(f"""
     <div class="buy-zone-card">
-        <h4 style="margin-top:0; color:#166534;">🟢 第一买点区（常规回调稳健防线）：${buy_zone_1_low} – ${buy_zone_1_high}</h4>
-        <p style="margin-bottom:0; color:#1f2937;">结合20日低点与布林带下轨支撑，适合分批建仓。</p>
+        <h4 style="margin-top:0; color:#166534;">🟢 第一买点区：${buy_zone_1_low} – ${buy_zone_1_high}</h4>
+        <p style="margin-bottom:0; color:#1f2937;">适合分批建仓的常规稳健防线。</p>
     </div>
     """, unsafe_allow_html=True)
 with z_col2:
     st.markdown(f"""
     <div class="deep-zone-card">
-        <h4 style="margin-top:0; color:#1e40af;">🛡️ 第二买点区（黄金坑极端防线）：${buy_zone_2_low} – ${buy_zone_2_high}</h4>
-        <p style="margin-bottom:0; color:#1f2937;">结合200日牛熊线与历史大底，高安全边际区。</p>
+        <h4 style="margin-top:0; color:#1e40af;">🛡️ 第二买点区：${buy_zone_2_low} – ${buy_zone_2_high}</h4>
+        <p style="margin-bottom:0; color:#1f2937;">极端大跌下的黄金坑高安全边际区。</p>
     </div>
     """, unsafe_allow_html=True)
 
-# 走势图表
 st.subheader("📈 股价走势与安全买点防线图")
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="收盘价", line=dict(color="#111827", width=2)))
 fig.add_trace(go.Scatter(x=df.index, y=df["SMA20"], mode="lines", name="20日均线", line=dict(color="#f59e0b", width=1.5, dash="dot")))
 fig.add_hrect(y0=buy_zone_1_low, y1=buy_zone_1_high, fillcolor="#22c55e", opacity=0.2, line_width=1, line_color="#16a34a", annotation_text="第一买点区")
-fig.add_hrect(y0=buy_zone_2_low, y1=buy_zone_2_high, fillcolor="#3b82f6", opacity=0.2, line_width=1, line_color="#2563eb", annotation_text="黄金坑防线")
 fig.update_layout(height=400, margin=dict(l=10, r=10, t=30, b=10), hovermode="x unified")
 st.plotly_chart(fig, use_container_width=True)
 
-# 新闻与情报
-st.subheader("📰 产业链核心新闻与大白话内幕解码")
+st.subheader("📰 产业链核心新闻动态")
 if news_titles:
     for idx, t in enumerate(news_titles[:4], 1):
         st.markdown(f"{idx}. {t}")
