@@ -1,11 +1,12 @@
 import datetime
 import json
 import os
+import re
 import urllib.parse
 import urllib.request
 import streamlit as st
 
-# 尝试导入行情库（如未安装则自动降级为手动/基准价格模式，确保软件永不崩溃）
+# 尝试导入行情库（如未安装则自动降级为内置接口/基准价格模式，确保永不崩溃）
 try:
   import yfinance as yf
 
@@ -50,12 +51,11 @@ def add_audit_log(action, detail):
   logs = st.session_state.audit_logs
   timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   logs.insert(0, {"time": timestamp, "action": action, "detail": detail})
-  # 保留最近 100 条审计记录
   st.session_state.audit_logs = logs[:100]
   save_json(AUDIT_LOG_FILE, st.session_state.audit_logs)
 
 
-# 默认初始底仓数据（按个股独立存储）
+# 默认初始底仓数据
 DEFAULT_PORTFOLIO = [
     {
         "symbol": "TSLA",
@@ -88,11 +88,52 @@ DEFAULT_PORTFOLIO = [
 
 DEFAULT_CONFIG = {
     "serverchan_key": "",
-    "black_swan_drop_pct": 5.0,  # 单日跌幅超过 5% 触发黑天鹅预警
-    "defense_1_pct": 5.0,  # 第一买入防线回撤比例 (%)
-    "defense_2_pct": 12.0,  # 第二买入防线回撤比例 (%)
-    "defense_3_pct": 20.0,  # 第三买入防线极限回撤比例 (%)
+    "black_swan_drop_pct": 5.0,
+    "defense_1_pct": 5.0,
+    "defense_2_pct": 12.0,
+    "defense_3_pct": 20.0,
 }
+
+# 内置热门全市场种子库（供不搜索时快速下拉）
+BUILTIN_STOCKS = [
+    # --- 美股核心与科技 ---
+    ("TSLA", "特斯拉 (Tesla)", "美股 (USD)", 250.0),
+    ("NVDA", "英伟达 (Nvidia)", "美股 (USD)", 138.0),
+    ("SPACEX", "SpaceX (未上市/私募)", "私募/美股 (USD)", 155.0),
+    ("AAPL", "苹果 (Apple)", "美股 (USD)", 230.0),
+    ("MSFT", "微软 (Microsoft)", "美股 (USD)", 425.0),
+    ("GOOGL", "谷歌 (Alphabet)", "美股 (USD)", 180.0),
+    ("AMZN", "亚马逊 (Amazon)", "美股 (USD)", 210.0),
+    ("META", "Meta Platforms", "美股 (USD)", 590.0),
+    ("AMD", "超威半导体 (AMD)", "美股 (USD)", 150.0),
+    ("PLTR", "Palantir", "美股 (USD)", 60.0),
+    ("COIN", "Coinbase", "美股 (USD)", 280.0),
+    ("MSTR", "MicroStrategy", "美股 (USD)", 350.0),
+    ("TSM", "台积电 (TSMC)", "美股 (USD)", 190.0),
+    ("BABA", "阿里巴巴 (美股)", "美股 (USD)", 95.0),
+    ("PDD", "拼多多 (PDD)", "美股 (USD)", 115.0),
+    # --- 港股核心标的 ---
+    ("00700.HK", "腾讯控股", "港股 (HKD)", 410.0),
+    ("09988.HK", "阿里巴巴-W", "港股 (HKD)", 92.0),
+    ("03690.HK", "美团-W", "港股 (HKD)", 170.0),
+    ("01810.HK", "小米集团-W", "港股 (HKD)", 28.0),
+    ("00981.HK", "中芯国际 (港股)", "港股 (HKD)", 27.0),
+    ("01211.HK", "比亚迪股份", "港股 (HKD)", 280.0),
+    ("02015.HK", "理想汽车-W", "港股 (HKD)", 95.0),
+    ("09868.HK", "小鹏汽车-W", "港股 (HKD)", 50.0),
+    ("09992.HK", "泡泡玛特", "港股 (HKD)", 75.0),
+    # --- A股核心龙头 ---
+    ("600519.SS", "贵州茅台", "A股 (RMB)", 1550.0),
+    ("300750.SZ", "宁德时代", "A股 (RMB)", 260.0),
+    ("002594.SZ", "比亚迪 (A股)", "A股 (RMB)", 295.0),
+    ("688981.SS", "中芯国际 (A股)", "A股 (RMB)", 90.0),
+    ("688256.SS", "寒武纪-U", "A股 (RMB)", 480.0),
+    ("300059.SZ", "东方财富", "A股 (RMB)", 26.0),
+    ("601318.SS", "中国平安", "A股 (RMB)", 55.0),
+    ("000858.SZ", "五粮液", "A股 (RMB)", 145.0),
+    ("600036.SS", "招商银行", "A股 (RMB)", 39.0),
+    ("601899.SS", "紫金矿业", "A股 (RMB)", 17.0),
+]
 
 # 初始化 Session State
 if "portfolio" not in st.session_state:
@@ -107,14 +148,169 @@ if "audit_logs" not in st.session_state:
       [{
           "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
           "action": "系统初始化",
-          "detail": "加载个股独立底仓数据库与配置项完成",
+          "detail": "加载个股独立底仓数据库与全市场检索引擎完成",
       }],
   )
 
+if "search_results" not in st.session_state:
+  st.session_state.search_results = []
 
-# ================= 3. Server酱 微信推送与网页端主动自检函数 =================
+
+# ================= 3. 全美股 / 全港股 / 全A股 实时模糊检索引擎 =================
+def normalize_stock_symbol(raw_symbol, market_hint=None):
+  """智能识别用户输入的股票代码，自动补全A股(.SS/.SZ/.BJ)和港股(.HK)标准后缀"""
+  sym = raw_symbol.strip().upper()
+  if not sym:
+    return "", market_hint or "美股 (USD)"
+
+  # 已经带后缀的情况
+  if sym.endswith(".SS") or sym.endswith(".SZ") or sym.endswith(".BJ"):
+    return sym, "A股 (RMB)"
+  if sym.endswith(".HK"):
+    code_part = sym.replace(".HK", "")
+    if code_part.isdigit():
+      code_part = code_part.zfill(5) if len(code_part) == 5 else code_part.zfill(4)
+    return f"{code_part}.HK", "港股 (HKD)"
+
+  # 纯数字智能识别
+  if sym.isdigit():
+    if len(sym) == 6:
+      # 6位数字为A股
+      if sym.startswith(("6", "5", "9")):
+        return f"{sym}.SS", "A股 (RMB)"
+      elif sym.startswith(("0", "1", "2", "3")):
+        return f"{sym}.SZ", "A股 (RMB)"
+      elif sym.startswith(("4", "8")):
+        return f"{sym}.BJ", "A股 (RMB)"
+    elif 1 <= len(sym) <= 5:
+      # 1~5位数字为港股
+      padded = sym.zfill(5) if len(sym) == 5 else sym.zfill(4)
+      return f"{padded}.HK", "港股 (HKD)"
+
+  # 带 sh/sz/hk 前缀的情况
+  if sym.startswith("SH") and sym[2:].isdigit():
+    return f"{sym[2:]}.SS", "A股 (RMB)"
+  if sym.startswith("SZ") and sym[2:].isdigit():
+    return f"{sym[2:]}.SZ", "A股 (RMB)"
+  if sym.startswith("HK") and sym[2:].isdigit():
+    return f"{sym[2:]}.HK", "港股 (HKD)"
+
+  return sym, market_hint or "美股 (USD)"
+
+
+@st.cache_data(ttl=600)
+def search_all_markets(keyword):
+  """同时检索 全A股、全港股、全美股（支持中文名称、拼音缩写、股票代码）"""
+  kw = keyword.strip()
+  if not kw:
+    return []
+
+  results = []
+  seen = set()
+
+  # 通道 1：新浪财经全市场建议接口（对中文名、A股、港股、中概美股支持极佳）
+  try:
+    encoded_kw = urllib.parse.quote(kw)
+    sina_url = f"https://suggest3.sinajs.cn/suggest/key={encoded_kw}"
+    req = urllib.request.Request(
+        sina_url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://finance.sina.com.cn",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+      raw_text = resp.read().decode("gbk", errors="ignore")
+      match = re.search(r'="([^"]+)"', raw_text)
+      if match:
+        items = match.group(1).split(";")
+        for item in items:
+          parts = item.split(",")
+          if len(parts) >= 5:
+            mkt_type = parts[1]  # 11:A股, 31:港股, 41:美股
+            code = parts[2].upper()
+            full_code = parts[3].upper()
+            cn_name = parts[4]
+
+            std_sym, mkt_label = None, None
+            if mkt_type in ["11", "12", "81"]:  # A股
+              if full_code.startswith("SH"):
+                std_sym = f"{code}.SS"
+              elif full_code.startswith("SZ"):
+                std_sym = f"{code}.SZ"
+              elif full_code.startswith("BJ"):
+                std_sym = f"{code}.BJ"
+              else:
+                std_sym, _ = normalize_stock_symbol(code, "A股 (RMB)")
+              mkt_label = "A股 (RMB)"
+            elif mkt_type in ["31", "33"]:  # 港股
+              std_sym = f"{code}.HK"
+              mkt_label = "港股 (HKD)"
+            elif mkt_type in ["41", "42"]:  # 美股
+              std_sym = code.replace(".", "-")
+              mkt_label = "美股 (USD)"
+
+            if std_sym and std_sym not in seen:
+              seen.add(std_sym)
+              results.append({
+                  "symbol": std_sym,
+                  "name": cn_name,
+                  "market": mkt_label,
+                  "display": f"[{mkt_label}] {cn_name} ({std_sym})",
+              })
+  except Exception:
+    pass
+
+  # 通道 2：Yahoo Finance 全球证券检索接口（补充全美股、ETF 及国际标的）
+  try:
+    yf_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(kw)}&quotesCount=12&newsCount=0"
+    req_yf = urllib.request.Request(
+        yf_url, headers={"User-Agent": "Mozilla/5.0"}
+    )
+    with urllib.request.urlopen(req_yf, timeout=5) as resp_yf:
+      yf_data = json.loads(resp_yf.read().decode("utf-8"))
+      for q in yf_data.get("quotes", []):
+        sym = q.get("symbol", "")
+        name = q.get("shortname") or q.get("longname") or sym
+        exch = q.get("exchange", "")
+        if not sym or sym in seen:
+          continue
+
+        if sym.endswith(".SS") or sym.endswith(".SZ"):
+          mkt_label = "A股 (RMB)"
+        elif sym.endswith(".HK"):
+          mkt_label = "港股 (HKD)"
+        else:
+          mkt_label = "美股 (USD)"
+
+        seen.add(sym)
+        results.append({
+            "symbol": sym,
+            "name": name,
+            "market": mkt_label,
+            "display": f"[{mkt_label}] {name} ({sym}) - {exch}",
+        })
+  except Exception:
+    pass
+
+  # 通道 3：本地内置库兜底匹配
+  for b_sym, b_name, b_mkt, _ in BUILTIN_STOCKS:
+    if (
+        kw.upper() in b_sym.upper() or kw.lower() in b_name.lower()
+    ) and b_sym not in seen:
+      seen.add(b_sym)
+      results.append({
+          "symbol": b_sym,
+          "name": b_name,
+          "market": b_mkt,
+          "display": f"[{b_mkt}] {b_name} ({b_sym})",
+      })
+
+  return results
+
+
+# ================= 4. Server酱 微信推送与网页端主动自检函数 =================
 def send_serverchan_msg(sendkey, title, content):
-  """向 Server酱 官方接口发起请求，返回 (是否成功: bool, 网页端回执详情: dict/str)"""
   if not sendkey or not sendkey.strip():
     return False, "SendKey 为空，请先在输入框中填入有效的 Server酱 SendKey！"
 
@@ -137,7 +333,6 @@ def send_serverchan_msg(sendkey, title, content):
     with urllib.request.urlopen(req, timeout=10) as response:
       resp_text = response.read().decode("utf-8")
       resp_json = json.loads(resp_text)
-      # Server酱 标准成功码为 code == 0 或 errno == 0
       if resp_json.get("code") == 0 or resp_json.get("errno") == 0:
         return True, resp_json
       else:
@@ -146,29 +341,33 @@ def send_serverchan_msg(sendkey, title, content):
     return False, f"网络请求或接口异常: {str(e)}"
 
 
-# ================= 4. 实时行情获取辅助函数 =================
+# ================= 5. 多通道实时行情获取函数 (支持美股/港股/A股) =================
 @st.cache_data(ttl=120)
 def fetch_live_price(symbol, fallback_price):
-  """尝试获取美股/A股实时价格，若失败或为未上市股票（如SpaceX）则使用基准价"""
-  if not HAS_YF or symbol.upper() in ["SPACEX"]:
+  """优先使用 yfinance 获取美股/港股/A股实时价，失败时自动回退至基准价"""
+  sym = symbol.strip().upper()
+  if sym in ["SPACEX"]:
     return fallback_price, 0.0, False
-  try:
-    ticker = yf.Ticker(symbol)
-    hist = ticker.history(period="2d")
-    if not hist.empty:
-      latest_price = float(hist["Close"].iloc[-1])
-      if len(hist) >= 2:
-        prev_close = float(hist["Close"].iloc[-2])
-        change_pct = ((latest_price - prev_close) / prev_close) * 100.0
-      else:
-        change_pct = 0.0
-      return round(latest_price, 2), round(change_pct, 2), True
-  except Exception:
-    pass
+
+  if HAS_YF:
+    try:
+      ticker = yf.Ticker(sym)
+      hist = ticker.history(period="2d")
+      if not hist.empty:
+        latest_price = float(hist["Close"].iloc[-1])
+        if len(hist) >= 2:
+          prev_close = float(hist["Close"].iloc[-2])
+          change_pct = ((latest_price - prev_close) / prev_close) * 100.0
+        else:
+          change_pct = 0.0
+        return round(latest_price, 2), round(change_pct, 2), True
+    except Exception:
+      pass
+
   return fallback_price, 0.0, False
 
 
-# ================= 5. 侧边栏：Server酱微信弹窗配置 & 防线参数 =================
+# ================= 6. 侧边栏：Server酱微信弹窗配置 & 防线参数 =================
 with st.sidebar:
   st.header("🔔 手机微信弹窗配置 (Server酱)")
   st.caption(
@@ -176,7 +375,6 @@ with st.sidebar:
       " 自检。"
   )
 
-  # 从持久化配置中自动回填 SendKey
   saved_key = st.session_state.sys_config.get("serverchan_key", "")
   input_key = st.text_input(
       "填入 Server酱 SendKey",
@@ -185,7 +383,6 @@ with st.sidebar:
       help="前往 sct.ftqq.com 获取 SendKey",
   )
 
-  # 只要输入框内容变化，立即自动保存，防止刷新丢失
   if input_key != saved_key:
     st.session_state.sys_config["serverchan_key"] = input_key.strip()
     save_json(CONFIG_FILE, st.session_state.sys_config)
@@ -203,7 +400,6 @@ with st.sidebar:
         "🚀 自检并测试弹窗", type="primary", use_container_width=True
     )
 
-  # 网页端主动自检反馈区
   if test_clicked:
     current_k = input_key.strip()
     st.session_state.sys_config["serverchan_key"] = current_k
@@ -276,77 +472,124 @@ with st.sidebar:
     save_json(CONFIG_FILE, st.session_state.sys_config)
 
 
-# ================= 6. 主界面标题与核心导航 =================
+# ================= 7. 主界面标题与核心导航 =================
 st.title("🛡️ AI 私人股票盯盘参谋 & 终极筹码规划终端")
 st.markdown(
-    "支持 **美股 / A股 / 私募股权** 多市场个股独立底仓校准、**终极目标股数追踪**、**AI 最优买入防线推演** 与 **突发黑天鹅微信秒级预警**。"
+    "支持 **全美股 / 全港股 / 全A股 / 私募股权** 任意个股检索与独立底仓校准、**终极目标股数追踪**、**AI 最优买入防线推演** 与 **突发黑天鹅微信秒级预警**。"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
-    "🎯 1. 终极目标与真实底仓校准 (按个股)",
+    "🎯 1. 终极目标与真实底仓校准 (支持全市场搜索)",
     "🛡️ 2. AI 最优买入防线与动态成本规划",
     "🦢 3. 实时盯盘与黑天鹅风险预警",
     "📜 4. 底仓变更审计日志",
 ])
 
-# ================= TAB 1: 终极目标与真实底仓校准（按个股独立管理） =================
+# ================= TAB 1: 终极目标与真实底仓校准（全市场检索 + 个股独立管理） =================
 with tab1:
-  st.subheader("🎯 个股真实底仓与终极目标校准中心")
-  st.info(
-      "💡 **设计说明**：每一只股票（如特斯拉、SpaceX、英伟达等）的价格和逻辑完全不同。请在此处**按单只股票分别选择/录入**您的股票名称、当前持股数、当前成本价以及未来想要持有的终极目标总股数。"
-  )
+  st.subheader("🎯 个股真实底仓与终极目标校准中心 (全美股 / 全港股 / 全A股)")
 
-  col_form, col_Quick = st.columns([1.2, 1])
+  col_form, col_Quick = st.columns([1.35, 1])
 
   with col_form:
     with st.container(border=True):
-      st.markdown("#### ➕ 新增 / 修改单只股票底仓")
+      st.markdown("#### 🔍 第一步：选择或全网搜索股票（支持全美股、全港股、全A股）")
 
-      preset_choice = st.selectbox(
-          "快速选择常用标的（或选择【自定义输入】添加任意美股/A股）",
+      mode = st.radio(
+          "查找方式",
           [
-              "自定义输入...",
-              "TSLA - 特斯拉 (Tesla)",
-              "SPACEX - SpaceX (未上市/私募)",
-              "NVDA - 英伟达 (Nvidia)",
-              "AAPL - 苹果 (Apple)",
-              "600519.SS - 贵州茅台 (A股)",
-              "300750.SZ - 宁德时代 (A股)",
+              "🌐 全网实时搜索（输入任意中文名/拼音/代码，查全A股/港股/美股）",
+              "⚡ 从热门股票库快速选择（美股/港股/A股常见龙头）",
+              "✍️ 手动直接输入（自动识别A股6位/港股5位/美股代码）",
           ],
+          horizontal=False,
       )
 
-      default_sym, default_name, default_mkt = "", "", "美股 (USD)"
-      if preset_choice != "自定义输入...":
-        parts = preset_choice.split(" - ")
-        default_sym = parts[0].strip()
-        default_name = parts[1].strip()
-        if ".SS" in default_sym or ".SZ" in default_sym:
-          default_mkt = "A股 (RMB)"
-        elif default_sym == "SPACEX":
-          default_mkt = "私募/美股 (USD)"
+      default_sym, default_name, default_mkt, default_price = (
+          "TSLA",
+          "特斯拉 (Tesla)",
+          "美股 (USD)",
+          250.0,
+      )
+
+      if "全网实时搜索" in mode:
+        s_col1, s_col2 = st.columns([3, 1])
+        with s_col1:
+          search_kw = st.text_input(
+              "输入股票名称、拼音或代码",
+              placeholder="例如：腾讯、比亚迪、寒武纪、小米、AMD、PLTR、600519、00700...",
+          )
+        with s_col2:
+          st.write("")
+          st.write("")
+          do_search = st.button("🔍 搜索全市场", use_container_width=True)
+
+        if do_search or search_kw.strip():
+          with st.spinner("正在检索全A股 / 全港股 / 全美股数据库..."):
+            st.session_state.search_results = search_all_markets(search_kw)
+
+        if st.session_state.search_results:
+          res_options = [r["display"] for r in st.session_state.search_results]
+          picked_idx = st.selectbox(
+              f"✅ 找到 {len(res_options)} 个全市场匹配结果，请点击选择：",
+              range(len(res_options)),
+              format_func=lambda i: res_options[i],
+          )
+          picked_item = st.session_state.search_results[picked_idx]
+          default_sym = picked_item["symbol"]
+          default_name = picked_item["name"]
+          default_mkt = picked_item["market"]
+          # 尝试获取实时参考价
+          lp_val, _, ok_lp = fetch_live_price(default_sym, 100.0)
+          default_price = lp_val if ok_lp else 100.0
+        elif search_kw.strip():
+          st.warning(
+              "未搜到在线结果，您可以直接在下方输入框填写代码（支持自动识别A股/港股/美股）。"
+          )
+
+      elif "热门股票库" in mode:
+        builtin_labels = [
+            f"[{m}] {n} ({s})" for s, n, m, _ in BUILTIN_STOCKS
+        ]
+        b_idx = st.selectbox(
+            "选择常见热门股票：",
+            range(len(builtin_labels)),
+            format_func=lambda i: builtin_labels[i],
+        )
+        default_sym, default_name, default_mkt, default_price = BUILTIN_STOCKS[
+            b_idx
+        ]
+
+      else:
+        st.caption(
+            "💡 **智能识别规则**：直接输入 `600519` 或 `002594` 自动识别为A股；输入 `00700` 或 `9988` 自动识别为港股；输入 `TSLA` 自动识别为美股。"
+        )
+        default_sym, default_name, default_mkt, default_price = (
+            "",
+            "",
+            "美股 (USD)",
+            100.0,
+        )
+
+      st.markdown("---")
+      st.markdown("#### 📝 第二步：录入该股票的真实底仓与终极目标")
 
       c1, c2, c3 = st.columns(3)
       with c1:
         in_symbol = st.text_input(
-            "股票代码 (Symbol)",
+            "股票代码 (自动补全后缀)",
             value=default_sym,
-            placeholder="如 TSLA / NVDA / 600519.SS",
+            placeholder="如 TSLA / 00700 / 600519",
         )
       with c2:
         in_name = st.text_input(
-            "股票名称", value=default_name, placeholder="如 特斯拉 / SpaceX"
+            "股票名称", value=default_name, placeholder="如 特斯拉 / 腾讯控股"
         )
       with c3:
-        in_market = st.selectbox(
-            "所属市场",
-            ["美股 (USD)", "A股 (RMB)", "港股 (HKD)", "私募/美股 (USD)"],
-            index=[
-                "美股 (USD)",
-                "A股 (RMB)",
-                "港股 (HKD)",
-                "私募/美股 (USD)",
-            ].index(default_mkt),
-        )
+        mkt_list = ["美股 (USD)", "港股 (HKD)", "A股 (RMB)", "私募/美股 (USD)"]
+        _, auto_mkt = normalize_stock_symbol(in_symbol, default_mkt)
+        mkt_idx = mkt_list.index(auto_mkt) if auto_mkt in mkt_list else 0
+        in_market = st.selectbox("所属市场", mkt_list, index=mkt_idx)
 
       c4, c5, c6, c7 = st.columns(4)
       with c4:
@@ -363,7 +606,10 @@ with tab1:
         )
       with c7:
         in_price = st.number_input(
-            "当前参考市价", min_value=0.01, value=150.0, step=1.0
+            "当前参考市价",
+            min_value=0.01,
+            value=float(default_price),
+            step=1.0,
         )
 
       if st.button(
@@ -374,18 +620,16 @@ with tab1:
         if not in_symbol.strip() and not in_name.strip():
           st.error("❌ 请至少填写【股票代码】或【股票名称】！")
         else:
-          sym_code = (
-              in_symbol.strip().upper()
-              if in_symbol.strip()
-              else in_name.strip().upper()
+          raw_s = (
+              in_symbol.strip() if in_symbol.strip() else in_name.strip()
           )
+          sym_code, detected_mkt = normalize_stock_symbol(raw_s, in_market)
           disp_name = in_name.strip() if in_name.strip() else sym_code
 
-          # 检查是否已存在该股票，存在则更新校准，不存在则追加
           updated = False
           for item in st.session_state.portfolio:
             if (
-                item["symbol"].upper() == sym_code
+                item["symbol"].upper() == sym_code.upper()
                 or item["name"] == disp_name
             ):
               item["symbol"] = sym_code
@@ -413,7 +657,7 @@ with tab1:
           action_type = "校准更新底仓" if updated else "新增股票底仓"
           add_audit_log(
               action_type,
-              f"标的: {disp_name}({sym_code}) | 当前持股: {in_shares}股 | 成本: {in_cost} | 终极目标: {in_target}股",
+              f"标的: [{in_market}] {disp_name}({sym_code}) | 当前持股: {in_shares}股 | 成本: {in_cost} | 终极目标: {in_target}股",
           )
           st.success(
               f"✅ 已成功保存【{disp_name} ({sym_code})】的真实底仓与终极目标！"
@@ -427,7 +671,8 @@ with tab1:
         st.warning("当前数据库为空，请在左侧添加您的第一只股票。")
       else:
         stock_labels = [
-            f"{p['name']} ({p['symbol']})" for p in st.session_state.portfolio
+            f"[{p['market'][:2]}] {p['name']} ({p['symbol']})"
+            for p in st.session_state.portfolio
         ]
         selected_idx = st.selectbox(
             "选择要直接修改的持仓标的",
@@ -496,13 +741,20 @@ with tab1:
       invested_val = cur_sh * cur_cs
       remain_sh = max(0.0, tg_sh - cur_sh)
       progress_pct = min(100.0, (cur_sh / tg_sh * 100.0) if tg_sh > 0 else 0.0)
+      curr_sign = (
+          "¥"
+          if "A股" in item["market"]
+          else ("HK$" if "港股" in item["market"] else "$")
+      )
 
       with st.container(border=True):
         m1, m2, m3, m4, m5, m6 = st.columns([2, 1.2, 1.2, 1.5, 1.5, 2])
-        m1.markdown(f"**{item['name']}**  \n`{item['symbol']}` | {item['market']}")
+        m1.markdown(
+            f"**{item['name']}**  \n`{item['symbol']}` | {item['market']}"
+        )
         m2.metric("当前持有股数", f"{cur_sh:,.0f} 股")
-        m3.metric("当前底仓成本", f"${cur_cs:,.2f}")
-        m4.metric("已投入总本金", f"${invested_val:,.2f}")
+        m3.metric("当前底仓成本", f"{curr_sign}{cur_cs:,.2f}")
+        m4.metric("已投入总本金", f"{curr_sign}{invested_val:,.2f}")
         m5.metric(
             "🎯 终极目标股数",
             f"{tg_sh:,.0f} 股",
@@ -525,7 +777,8 @@ with tab2:
     st.info("请先在第一个标签页中添加您的股票。")
   else:
     stock_names = [
-        f"{p['name']} ({p['symbol']})" for p in st.session_state.portfolio
+        f"[{p['market'][:2]}] {p['name']} ({p['symbol']})"
+        for p in st.session_state.portfolio
     ]
     sel_i = st.selectbox(
         "👉 选择要进行【买入防线与筹码规划】的个股：",
@@ -533,6 +786,11 @@ with tab2:
         format_func=lambda i: stock_names[i],
     )
     stk = st.session_state.portfolio[sel_i]
+    curr_sign = (
+        "¥"
+        if "A股" in stk["market"]
+        else ("HK$" if "港股" in stk["market"] else "$")
+    )
 
     live_p, chg_pct, is_live = fetch_live_price(
         stk["symbol"], stk.get("manual_price", stk["cost"])
@@ -540,7 +798,7 @@ with tab2:
 
     col_p1, col_p2, col_p3, col_p4 = st.columns(4)
     base_price = col_p1.number_input(
-        f"【{stk['name']}】当前基准市价",
+        f"【{stk['name']}】当前基准市价 ({curr_sign})",
         min_value=0.01,
         value=float(live_p),
         step=1.0,
@@ -549,25 +807,26 @@ with tab2:
       st.session_state.portfolio[sel_i]["manual_price"] = base_price
       save_json(PORTFOLIO_FILE, st.session_state.portfolio)
 
-    col_p2.metric("您的真实底仓成本", f"${stk['cost']:,.2f}")
-    col_p3.metric("当前持有 / 终极目标", f"{stk['shares']:.0f} / {stk['target_shares']:.0f} 股")
+    col_p2.metric("您的真实底仓成本", f"{curr_sign}{stk['cost']:,.2f}")
+    col_p3.metric(
+        "当前持有 / 终极目标",
+        f"{stk['shares']:.0f} / {stk['target_shares']:.0f} 股",
+    )
     gap_shares = max(0.0, stk["target_shares"] - stk["shares"])
     col_p4.metric("距离终极目标缺口", f"{gap_shares:,.0f} 股")
 
-    # 计算三道防线价格（基于当前市价与底仓成本的综合锚定）
-    anchor_price = min(base_price, stk["cost"]) if stk["cost"] > 0 else base_price
     p_def1 = round(base_price * (1 - d1 / 100.0), 2)
     p_def2 = round(base_price * (1 - d2 / 100.0), 2)
     p_def3 = round(base_price * (1 - d3 / 100.0), 2)
 
-    # 将缺口股数按 20% : 30% : 50% 金字塔模型分配到三道防线
     buy_sh1 = round(gap_shares * 0.20, 1) if gap_shares > 0 else 10.0
     buy_sh2 = round(gap_shares * 0.30, 1) if gap_shares > 0 else 15.0
     buy_sh3 = round(gap_shares * 0.50, 1) if gap_shares > 0 else 25.0
 
-    st.markdown("#### 📐 金字塔三道买入防线推演表（按终极目标缺口 2:3:5 智能分配筹码）")
+    st.markdown(
+        "#### 📐 金字塔三道买入防线推演表（按终极目标缺口 2:3:5 智能分配筹码）"
+    )
 
-    # 第一防线计算
     new_sh1 = stk["shares"] + buy_sh1
     new_cost1 = (
         ((stk["shares"] * stk["cost"]) + (buy_sh1 * p_def1)) / new_sh1
@@ -575,7 +834,6 @@ with tab2:
         else p_def1
     )
 
-    # 第二防线累计计算
     new_sh2 = new_sh1 + buy_sh2
     new_cost2 = (
         ((new_sh1 * new_cost1) + (buy_sh2 * p_def2)) / new_sh2
@@ -583,7 +841,6 @@ with tab2:
         else p_def2
     )
 
-    # 第三防线累计计算
     new_sh3 = new_sh2 + buy_sh3
     new_cost3 = (
         ((new_sh2 * new_cost2) + (buy_sh3 * p_def3)) / new_sh3
@@ -595,37 +852,45 @@ with tab2:
     with f1:
       with st.container(border=True):
         st.markdown(f"##### 🟢 第一防线 (回调 -{d1}%)")
-        st.metric("触发买入价", f"${p_def1:,.2f}")
-        st.write(f"- 建议吸筹：**{buy_sh1} 股** (约 ${buy_sh1 * p_def1:,.2f})")
+        st.metric("触发买入价", f"{curr_sign}{p_def1:,.2f}")
+        st.write(
+            f"- 建议吸筹：**{buy_sh1} 股** (约 {curr_sign}{buy_sh1 * p_def1:,.2f})"
+        )
         st.write(f"- 补仓后总持股：**{new_sh1} 股**")
-        st.write(f"- 补仓后摊薄成本：**${new_cost1:,.2f}**")
+        st.write(f"- 补仓后摊薄成本：**{curr_sign}{new_cost1:,.2f}**")
     with f2:
       with st.container(border=True):
         st.markdown(f"##### 🟡 第二防线 (黄金坑 -{d2}%)")
-        st.metric("触发买入价", f"${p_def2:,.2f}")
-        st.write(f"- 建议加仓：**{buy_sh2} 股** (约 ${buy_sh2 * p_def2:,.2f})")
+        st.metric("触发买入价", f"{curr_sign}{p_def2:,.2f}")
+        st.write(
+            f"- 建议加仓：**{buy_sh2} 股** (约 {curr_sign}{buy_sh2 * p_def2:,.2f})"
+        )
         st.write(f"- 累计总持股：**{new_sh2} 股**")
-        st.write(f"- 累计摊薄成本：**${new_cost2:,.2f}**")
+        st.write(f"- 累计摊薄成本：**{curr_sign}{new_cost2:,.2f}**")
     with f3:
       with st.container(border=True):
         st.markdown(f"##### 🔴 第三防线 (极限铁底 -{d3}%)")
-        st.metric("触发买入价", f"${p_def3:,.2f}")
-        st.write(f"- 建议重仓抄底：**{buy_sh3} 股** (约 ${buy_sh3 * p_def3:,.2f})")
+        st.metric("触发买入价", f"{curr_sign}{p_def3:,.2f}")
+        st.write(
+            f"- 建议重仓抄底：**{buy_sh3} 股** (约"
+            f" {curr_sign}{buy_sh3 * p_def3:,.2f})"
+        )
         st.write(f"- 终极达成总持股：**{new_sh3} 股**")
-        st.write(f"- 终极摊薄成本：**${new_cost3:,.2f}**")
+        st.write(f"- 终极摊薄成本：**{curr_sign}{new_cost3:,.2f}**")
 
     if st.button(f"📲 将【{stk['name']}】防线挂单计划推送到手机微信"):
       k = st.session_state.sys_config.get("serverchan_key", "")
       msg_title = f"【买入防线计划】{stk['name']} ({stk['symbol']}) 筹码推演"
       msg_body = (
           f"### 🎯 {stk['name']} ({stk['symbol']}) 底仓与防线简报\n"
-          f"- **当前底仓**：{stk['shares']} 股 (成本 ${stk['cost']})\n"
+          f"- **所属市场**：{stk['market']}\n"
+          f"- **当前底仓**：{stk['shares']} 股 (成本 {curr_sign}{stk['cost']})\n"
           f"- **终极目标**：{stk['target_shares']} 股 (还差 {gap_shares} 股)\n"
-          f"- **当前市价**：${base_price}\n\n"
+          f"- **当前市价**：{curr_sign}{base_price}\n\n"
           f"---\n"
-          f"1. **第一防线 (-{d1}%)**：**${p_def1}** | 建议买入 {buy_sh1} 股 -> 摊薄成本至 ${new_cost1:.2f}\n"
-          f"2. **第二防线 (-{d2}%)**：**${p_def2}** | 建议买入 {buy_sh2} 股 -> 摊薄成本至 ${new_cost2:.2f}\n"
-          f"3. **第三防线 (-{d3}%)**：**${p_def3}** | 建议买入 {buy_sh3} 股 -> 摊薄成本至 ${new_cost3:.2f}\n"
+          f"1. **第一防线 (-{d1}%)**：**{curr_sign}{p_def1}** | 建议买入 {buy_sh1} 股 -> 摊薄成本至 {curr_sign}{new_cost1:.2f}\n"
+          f"2. **第二防线 (-{d2}%)**：**{curr_sign}{p_def2}** | 建议买入 {buy_sh2} 股 -> 摊薄成本至 {curr_sign}{new_cost2:.2f}\n"
+          f"3. **第三防线 (-{d3}%)**：**{curr_sign}{p_def3}** | 建议买入 {buy_sh3} 股 -> 摊薄成本至 {curr_sign}{new_cost3:.2f}\n"
       )
       ok, resp = send_serverchan_msg(k, msg_title, msg_body)
       if ok:
@@ -636,7 +901,7 @@ with tab2:
 
 # ================= TAB 3: 实时盯盘与突发黑天鹅风险预警 =================
 with tab3:
-  st.subheader("🦢 双市场实时盯盘 & 突发黑天鹅风险监控雷达")
+  st.subheader("🦢 全市场实时盯盘 & 突发黑天鹅风险监控雷达")
   st.markdown(
       f"当个股单日跌幅超过 **{bs_drop}%** 或跌破您的核心防线时，系统将自动亮起黑天鹅警报，支持一键发送微信紧急通知。"
   )
@@ -646,34 +911,40 @@ with tab3:
 
   alerts_triggered = []
   for p in st.session_state.portfolio:
+    curr_sign = (
+        "¥"
+        if "A股" in p["market"]
+        else ("HK$" if "港股" in p["market"] else "$")
+    )
     lp, chg, is_live_flag = fetch_live_price(
         p["symbol"], p.get("manual_price", p["cost"])
     )
     pnl_pct = ((lp - p["cost"]) / p["cost"] * 100.0) if p["cost"] > 0 else 0.0
-    def1_line = round(lp * (1 - d1 / 100.0), 2)
 
     with st.container(border=True):
       c_a, c_b, c_c, c_d = st.columns([2, 1.5, 1.5, 2.5])
       c_a.markdown(
-          f"**{p['name']} ({p['symbol']})**  \n状态:"
+          f"**{p['name']} ({p['symbol']})**  \n{p['market']} |"
           f" {'🟢 实时行情' if is_live_flag else '🔵 基准估值'}"
       )
-      c_b.metric("最新价格", f"${lp:,.2f}", f"{chg:+.2f}%")
-      c_c.metric("底仓浮盈亏", f"{pnl_pct:+.2f}%", f"成本 ${p['cost']:,.2f}")
+      c_b.metric("最新价格", f"{curr_sign}{lp:,.2f}", f"{chg:+.2f}%")
+      c_c.metric(
+          "底仓浮盈亏", f"{pnl_pct:+.2f}%", f"成本 {curr_sign}{p['cost']:,.2f}"
+      )
 
       if chg <= -bs_drop:
         c_d.error(
             f"🦢 **黑天鹅暴跌预警**：单日暴跌 {chg:.2f}%，已超阈值 (-{bs_drop}%)！"
         )
         alerts_triggered.append(
-            f"- **{p['name']} ({p['symbol']})** 触发黑天鹅单日暴跌：{chg:.2f}% (现价 ${lp})"
+            f"- **{p['name']} ({p['symbol']})** 触发黑天鹅单日暴跌：{chg:.2f}% (现价 {curr_sign}{lp})"
         )
       elif lp <= p["cost"] * (1 - d1 / 100.0):
         c_d.warning(
-            f"🛡️ **进入击球区**：现价 ${lp} 已低于成本防线 (-{d1}%)，建议关注分批吸筹！"
+            f"🛡️ **进入击球区**：现价 {curr_sign}{lp} 已低于成本防线 (-{d1}%)，建议关注分批吸筹！"
         )
         alerts_triggered.append(
-            f"- **{p['name']} ({p['symbol']})** 跌入成本第一防线：现价 ${lp} (底仓成本 ${p['cost']})"
+            f"- **{p['name']} ({p['symbol']})** 跌入成本第一防线：现价 {curr_sign}{lp} (底仓成本 {curr_sign}{p['cost']})"
         )
       else:
         c_d.success("✅ 走势平稳，未触发极端黑天鹅异动。")
