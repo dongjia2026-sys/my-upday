@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>资产管理与 Server酱 配置中心</title>
+    <title>AssetHorizon - 资产底仓与微信提醒看板</title>
     <style>
         :root {
             --bg-color: #0f172a;
@@ -201,30 +201,46 @@
 </div>
 
 <script>
-    // --- 1. 个股底仓管理逻辑 ---
-    let stocks = JSON.parse(localStorage.getItem('portfolio_stocks')) || [
-        { name: '特斯拉 (TSLA)', shares: 10, cost: 120, target: 100 },
-        { name: 'SpaceX', shares: 30, cost: 140, target: 150 },
-        { name: '英伟达 (NVDA)', shares: 15, cost: 110, target: 80 }
-    ];
+    // --- 1. 带强容错保护的个股底仓管理逻辑 ---
+    let stocks = [];
+    try {
+        const savedStocks = localStorage.getItem('portfolio_stocks');
+        stocks = savedStocks ? JSON.parse(savedStocks) : null;
+        if (!Array.isArray(stocks)) {
+            throw new Error('Not an array');
+        }
+    } catch (e) {
+        // 如果本地数据损坏，启用默认安全数据并重置
+        stocks = [
+            { name: '特斯拉 (TSLA)', shares: 10, cost: 120, target: 100 },
+            { name: 'SpaceX', shares: 30, cost: 140, target: 150 },
+            { name: '英伟达 (NVDA)', shares: 15, cost: 110, target: 80 }
+        ];
+        localStorage.setItem('portfolio_stocks', JSON.stringify(stocks));
+    }
 
     function renderStocks() {
         const tbody = document.getElementById('stockTableBody');
+        if (!tbody) return;
         tbody.innerHTML = '';
         if (stocks.length === 0) {
             tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">暂无持仓数据，请在上方向添加。</td></tr>`;
             return;
         }
         stocks.forEach((s, index) => {
-            const invested = (s.shares * s.cost).toFixed(2);
-            const rate = s.target > 0 ? ((s.shares / s.target) * 100).toFixed(1) : 0;
+            const shares = Number(s.shares) || 0;
+            const cost = Number(s.cost) || 0;
+            const target = Number(s.target) || 1;
+            const invested = (shares * cost).toFixed(2);
+            const rate = target > 0 ? ((shares / target) * 100).toFixed(1) : 0;
+            
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td><strong>${s.name}</strong></td>
-                <td>${s.shares} 股</td>
-                <td>$${s.cost}</td>
+                <td><strong>${s.name || '未命名'}</strong></td>
+                <td>${shares} 股</td>
+                <td>$${cost}</td>
                 <td>$${invested}</td>
-                <td>${s.target} 股</td>
+                <td>${target} 股</td>
                 <td><span style="color: ${rate >= 100 ? 'var(--success)' : 'var(--accent)'}; font-weight: 600;">${rate}%</span></td>
                 <td>
                     <button class="btn btn-danger" style="padding: 4px 8px; font-size: 12px;" onclick="deleteStock(${index})">删除</button>
@@ -232,14 +248,25 @@
             `;
             tbody.appendChild(tr);
         });
-        localStorage.setItem('portfolio_stocks', JSON.stringify(stocks));
+        try {
+            localStorage.setItem('portfolio_stocks', JSON.stringify(stocks));
+        } catch (err) {
+            console.error('Storage save failed', err);
+        }
     }
 
     function saveStock() {
-        const name = document.getElementById('stockName').value.trim();
-        const shares = parseFloat(document.getElementById('currentShares').value);
-        const cost = parseFloat(document.getElementById('currentCost').value);
-        const target = parseFloat(document.getElementById('targetShares').value);
+        const nameEl = document.getElementById('stockName');
+        const sharesEl = document.getElementById('currentShares');
+        const costEl = document.getElementById('currentCost');
+        const targetEl = document.getElementById('targetShares');
+
+        if (!nameEl || !sharesEl || !costEl || !targetEl) return;
+
+        const name = nameEl.value.trim();
+        const shares = parseFloat(sharesEl.value);
+        const cost = parseFloat(costEl.value);
+        const target = parseFloat(targetEl.value);
 
         if (!name || isNaN(shares) || isNaN(cost) || isNaN(target)) {
             alert('请完整填写所有股票信息字段！');
@@ -249,43 +276,56 @@
         stocks.push({ name, shares, cost, target });
         renderStocks();
 
-        // 清空输入框
-        document.getElementById('stockName').value = '';
-        document.getElementById('currentShares').value = '';
-        document.getElementById('currentCost').value = '';
-        document.getElementById('targetShares').value = '';
+        nameEl.value = '';
+        sharesEl.value = '';
+        costEl.value = '';
+        targetEl.value = '';
     }
 
     function deleteStock(index) {
-        stocks.splice(index, 1);
-        renderStocks();
+        if (index >= 0 && index < stocks.length) {
+            stocks.splice(index, 1);
+            renderStocks();
+        }
     }
 
     // --- 2. Server酱持久化与网页端主动自检逻辑 ---
     window.addEventListener('DOMContentLoaded', () => {
-        // 自动恢复底仓
         renderStocks();
 
-        // 自动恢复 Server酱 Key 记忆
-        const savedKey = localStorage.getItem('serverchan_key');
-        if (savedKey) {
-            document.getElementById('sendKeyInput').value = savedKey;
+        try {
+            const savedKey = localStorage.getItem('serverchan_key');
+            const keyInput = document.getElementById('sendKeyInput');
+            if (savedKey && keyInput) {
+                keyInput.value = savedKey;
+            }
+        } catch (e) {
+            console.error('Failed to load serverchan_key', e);
         }
     });
 
     function saveServerKey() {
-        const key = document.getElementById('sendKeyInput').value.trim();
+        const keyInput = document.getElementById('sendKeyInput');
+        if (!keyInput) return;
+        const key = keyInput.value.trim();
         if (!key) {
             alert('请输入有效的 Server酱 SendKey！');
             return;
         }
-        localStorage.setItem('serverchan_key', key);
-        alert('✅ Server酱配置已成功持久化保存到本地浏览器缓存！');
+        try {
+            localStorage.setItem('serverchan_key', key);
+            alert('✅ Server酱配置已成功持久化保存到本地浏览器缓存！');
+        } catch (e) {
+            alert('❌ 保存失败：浏览器存储受限。');
+        }
     }
 
     async function testServerChanPush() {
-        const key = document.getElementById('sendKeyInput').value.trim();
+        const keyInput = document.getElementById('sendKeyInput');
         const consoleBox = document.getElementById('consoleOutput');
+        if (!keyInput || !consoleBox) return;
+
+        const key = keyInput.value.trim();
 
         if (!key) {
             consoleBox.style.color = 'var(--danger)';
@@ -293,8 +333,9 @@
             return;
         }
 
-        // 自动保存一次
-        localStorage.setItem('serverchan_key', key);
+        try {
+            localStorage.setItem('serverchan_key', key);
+        } catch (e) {}
 
         consoleBox.style.color = 'var(--accent)';
         consoleBox.textContent = '⏳ 正在向 Server酱 官方 API 发送测试请求 (Self-Test)...';
@@ -307,7 +348,6 @@
             const response = await fetch(url, { method: 'GET' });
             const data = await response.json();
 
-            // 检查 Server酱 的标准返回码 (通常 code === 0 或 errno === 0 表示成功)
             if (response.ok && (data.code === 0 || data.errno === 0 || data.pushid)) {
                 consoleBox.style.color = 'var(--success)';
                 consoleBox.textContent = `✅ 网页端自检成功！API 响应正常。\n服务器返回详情: ${JSON.stringify(data, null, 2)}\n\n👉 请检查您的手机微信，弹窗消息已发送！`;
@@ -317,7 +357,7 @@
             }
         } catch (error) {
             consoleBox.style.color = 'var(--danger)';
-            consoleBox.textContent = `❌ 网络请求失败（Network Error）：\n${error.message}\n\n👉 可能原因：网络中断、CORS 限制或 API 地址错误。`;
+            consoleBox.textContent = `❌ 网络请求失败（Network Error / CORS）：\n${error.message}\n\n👉 可能原因：网络中断、浏览器跨域限制或 API 地址错误。`;
         }
     }
 </script>
