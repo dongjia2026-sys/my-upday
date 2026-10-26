@@ -112,7 +112,6 @@ def get_realtime_market_data(symbol, manual_fallback):
   if HAS_YF:
     try:
       ticker = yf.Ticker(sym)
-      # 尝试获取最近盘中数据
       hist = ticker.history(period="5d")
       if not hist.empty:
         api_price = float(hist["Close"].iloc[-1])
@@ -126,7 +125,6 @@ def get_realtime_market_data(symbol, manual_fallback):
               else 0.0
           )
 
-      # 尝试获取新闻
       try:
         news_list = ticker.news
         if news_list:
@@ -159,7 +157,7 @@ def get_realtime_market_data(symbol, manual_fallback):
 def fetch_live_macro_briefs():
   """修复一分钟简报打不开：采用高稳定性本地结构化聚合引擎，秒开且内容专业"""
   now_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-  return [
+  briefs = [
       {
           "time": now_date,
           "category": "🔥 宏观与市场流动性",
@@ -183,18 +181,18 @@ def fetch_live_macro_briefs():
           "国内政策面持续释放稳增长信号，核心资产估值修复动力仍在。南向与北向资金在关键板块呈现拉锯战，"
           "建议投资者严守买入防线，切勿盲目追涨。"
       ),
-  ], [
+  ]
+  default_news = [
       {
           "title": "全球科技巨头资本开支与AI基础设施建设进度追踪",
           "publisher": "华尔街见闻",
-          "link": "#",
       },
       {
           "title": "新能源汽车与核心供应链最新交付数据解读",
           "publisher": "财联社",
-          "link": "#",
       },
   ]
+  return briefs, default_news
 
 
 def send_serverchan_msg(sendkey, title, content):
@@ -283,7 +281,7 @@ with st.sidebar:
 # ================= 5. 主界面与标签页 =================
 st.title("⚡ AI 私人股票盯盘、实时资产与一分钟简报终端")
 st.markdown(
-    "汇集 **持仓数量、成本、实时市值与盈亏状态自动联动驾驶舱**、**一分钟财经简报秒开引擎** 与 **科学的买入防线规划**。"
+    "汇集 **持仓数量, 成本, 实时市值与盈亏状态自动联动驾驶舱**、**一分钟财经简报秒开引擎** 与 **科学的买入防线规划**。"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -378,7 +376,7 @@ with tab1:
 
   st.markdown("---")
 
-  # 底部：修复后的秒开一分钟简报
+  # 底部：一分钟简报
   col_news1, col_news2 = st.columns([1.2, 1])
 
   with col_news1:
@@ -571,9 +569,8 @@ with tab2:
 
 # ================= TAB 2: 防线推演（含科学逻辑简介） =================
 with tab2:
-  st.subheader("🛡️ AI 最优买入防线计算 & 阶梯补仓动态成本规划")
+  st.subheader("🛡️ AI 最优买入防线计算 & 阶梯补仓动态成本模拟器")
 
-  # --- 新增：防线规划科学逻辑与心理学简介 ---
   with st.expander("📖 为什么我们要设立【三道买入防线】？（点击展开筹码规划逻辑）", expanded=True):
     st.markdown("""
         在长线投资与筹码规划中，**“一次性满仓”**或**“盲目恐慌割肉”**是散户亏损的根源。本系统为您量身定制的**金字塔三道买入防线**，其核心逻辑与科学依据如下：
