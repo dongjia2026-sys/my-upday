@@ -55,7 +55,7 @@ def add_audit_log(action, detail):
   save_json(AUDIT_LOG_FILE, st.session_state.audit_logs)
 
 
-# 默认初始底仓数据
+# 默认初始底仓数据（可在界面最右侧一键删除不需要的股票）
 DEFAULT_PORTFOLIO = [
     {
         "symbol": "TSLA",
@@ -70,19 +70,10 @@ DEFAULT_PORTFOLIO = [
         "symbol": "SPACEX",
         "name": "SpaceX (未上市/私募)",
         "market": "私募/美股 (USD)",
-        "shares": 30.0,
-        "cost": 140.0,
-        "target_shares": 150.0,
-        "manual_price": 155.0,
-    },
-    {
-        "symbol": "NVDA",
-        "name": "英伟达 (Nvidia)",
-        "market": "美股 (USD)",
-        "shares": 15.0,
-        "cost": 110.0,
+        "shares": 50.0,
+        "cost": 140.47,
         "target_shares": 100.0,
-        "manual_price": 138.0,
+        "manual_price": 155.0,
     },
 ]
 
@@ -163,19 +154,18 @@ def normalize_stock_symbol(raw_symbol, market_hint=None):
   if not sym:
     return "", market_hint or "美股 (USD)"
 
-  # 已经带后缀的情况
   if sym.endswith(".SS") or sym.endswith(".SZ") or sym.endswith(".BJ"):
     return sym, "A股 (RMB)"
   if sym.endswith(".HK"):
     code_part = sym.replace(".HK", "")
     if code_part.isdigit():
-      code_part = code_part.zfill(5) if len(code_part) == 5 else code_part.zfill(4)
+      code_part = (
+          code_part.zfill(5) if len(code_part) == 5 else code_part.zfill(4)
+      )
     return f"{code_part}.HK", "港股 (HKD)"
 
-  # 纯数字智能识别
   if sym.isdigit():
     if len(sym) == 6:
-      # 6位数字为A股
       if sym.startswith(("6", "5", "9")):
         return f"{sym}.SS", "A股 (RMB)"
       elif sym.startswith(("0", "1", "2", "3")):
@@ -183,11 +173,9 @@ def normalize_stock_symbol(raw_symbol, market_hint=None):
       elif sym.startswith(("4", "8")):
         return f"{sym}.BJ", "A股 (RMB)"
     elif 1 <= len(sym) <= 5:
-      # 1~5位数字为港股
       padded = sym.zfill(5) if len(sym) == 5 else sym.zfill(4)
       return f"{padded}.HK", "港股 (HKD)"
 
-  # 带 sh/sz/hk 前缀的情况
   if sym.startswith("SH") and sym[2:].isdigit():
     return f"{sym[2:]}.SS", "A股 (RMB)"
   if sym.startswith("SZ") and sym[2:].isdigit():
@@ -208,7 +196,7 @@ def search_all_markets(keyword):
   results = []
   seen = set()
 
-  # 通道 1：新浪财经全市场建议接口（对中文名、A股、港股、中概美股支持极佳）
+  # 通道 1：新浪财经全市场建议接口
   try:
     encoded_kw = urllib.parse.quote(kw)
     sina_url = f"https://suggest3.sinajs.cn/suggest/key={encoded_kw}"
@@ -227,13 +215,13 @@ def search_all_markets(keyword):
         for item in items:
           parts = item.split(",")
           if len(parts) >= 5:
-            mkt_type = parts[1]  # 11:A股, 31:港股, 41:美股
+            mkt_type = parts[1]
             code = parts[2].upper()
             full_code = parts[3].upper()
             cn_name = parts[4]
 
             std_sym, mkt_label = None, None
-            if mkt_type in ["11", "12", "81"]:  # A股
+            if mkt_type in ["11", "12", "81"]:
               if full_code.startswith("SH"):
                 std_sym = f"{code}.SS"
               elif full_code.startswith("SZ"):
@@ -243,10 +231,10 @@ def search_all_markets(keyword):
               else:
                 std_sym, _ = normalize_stock_symbol(code, "A股 (RMB)")
               mkt_label = "A股 (RMB)"
-            elif mkt_type in ["31", "33"]:  # 港股
+            elif mkt_type in ["31", "33"]:
               std_sym = f"{code}.HK"
               mkt_label = "港股 (HKD)"
-            elif mkt_type in ["41", "42"]:  # 美股
+            elif mkt_type in ["41", "42"]:
               std_sym = code.replace(".", "-")
               mkt_label = "美股 (USD)"
 
@@ -261,7 +249,7 @@ def search_all_markets(keyword):
   except Exception:
     pass
 
-  # 通道 2：Yahoo Finance 全球证券检索接口（补充全美股、ETF 及国际标的）
+  # 通道 2：Yahoo Finance 全球证券检索接口
   try:
     yf_url = f"https://query2.finance.yahoo.com/v1/finance/search?q={urllib.parse.quote(kw)}&quotesCount=12&newsCount=0"
     req_yf = urllib.request.Request(
@@ -341,10 +329,9 @@ def send_serverchan_msg(sendkey, title, content):
     return False, f"网络请求或接口异常: {str(e)}"
 
 
-# ================= 5. 多通道实时行情获取函数 (支持美股/港股/A股) =================
+# ================= 5. 多通道实时行情获取函数 =================
 @st.cache_data(ttl=120)
 def fetch_live_price(symbol, fallback_price):
-  """优先使用 yfinance 获取美股/港股/A股实时价，失败时自动回退至基准价"""
   sym = symbol.strip().upper()
   if sym in ["SPACEX"]:
     return fallback_price, 0.0, False
@@ -485,7 +472,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📜 4. 底仓变更审计日志",
 ])
 
-# ================= TAB 1: 终极目标与真实底仓校准（全市场检索 + 个股独立管理） =================
+# ================= TAB 1: 终极目标与真实底仓校准 =================
 with tab1:
   st.subheader("🎯 个股真实底仓与终极目标校准中心 (全美股 / 全港股 / 全A股)")
 
@@ -539,7 +526,6 @@ with tab1:
           default_sym = picked_item["symbol"]
           default_name = picked_item["name"]
           default_mkt = picked_item["market"]
-          # 尝试获取实时参考价
           lp_val, _, ok_lp = fetch_live_price(default_sym, 100.0)
           default_price = lp_val if ok_lp else 100.0
         elif search_kw.strip():
@@ -732,8 +718,20 @@ with tab1:
             st.rerun()
 
   st.markdown("---")
-  st.markdown("#### 📋 您的个股独立底仓与终极目标总览表")
-  if len(st.session_state.portfolio) > 0:
+  head_col1, head_col2 = st.columns([4, 1])
+  with head_col1:
+    st.markdown("#### 📋 您的个股独立底仓与终极目标总览表")
+  with head_col2:
+    if len(st.session_state.portfolio) > 0:
+      if st.button("🧹 一键清空全部持仓", use_container_width=True):
+        st.session_state.portfolio = []
+        save_json(PORTFOLIO_FILE, [])
+        add_audit_log("清空持仓", "用户一键清空了所有底仓记录")
+        st.rerun()
+
+  if len(st.session_state.portfolio) == 0:
+    st.info("💡 当前还没有任何持仓股票，请在上方搜索并添加您购买的股票。")
+  else:
     for idx, item in enumerate(st.session_state.portfolio):
       cur_sh = float(item["shares"])
       cur_cs = float(item["cost"])
@@ -748,7 +746,10 @@ with tab1:
       )
 
       with st.container(border=True):
-        m1, m2, m3, m4, m5, m6 = st.columns([2, 1.2, 1.2, 1.5, 1.5, 2])
+        # 扩展为 7 列，最右侧 m7 专门放置直接删除按钮
+        m1, m2, m3, m4, m5, m6, m7 = st.columns(
+            [1.8, 1.1, 1.2, 1.4, 1.3, 1.8, 0.8]
+        )
         m1.markdown(
             f"**{item['name']}**  \n`{item['symbol']}` | {item['market']}"
         )
@@ -764,6 +765,21 @@ with tab1:
         with m6:
           st.write(f"**终极目标达成率：{progress_pct:.1f}%**")
           st.progress(progress_pct / 100.0)
+        with m7:
+          st.write("")
+          if st.button(
+              "🗑️ 删除",
+              key=f"card_del_{idx}_{item['symbol']}",
+              use_container_width=True,
+              help=f"点击直接从列表中删除 {item['name']}",
+          ):
+            removed_item = st.session_state.portfolio.pop(idx)
+            save_json(PORTFOLIO_FILE, st.session_state.portfolio)
+            add_audit_log(
+                "卡片直接删除",
+                f"从总览表移除了 {removed_item['name']} ({removed_item['symbol']})",
+            )
+            st.rerun()
 
 
 # ================= TAB 2: AI 最优买入防线与动态成本规划 =================
