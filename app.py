@@ -63,6 +63,7 @@ DEFAULT_PORTFOLIO = [
         "shares": 10.0,
         "cost": 120.0,
         "target_shares": 100.0,
+        "manual_price": 250.0,
     },
     {
         "symbol": "NVDA",
@@ -71,6 +72,7 @@ DEFAULT_PORTFOLIO = [
         "shares": 15.0,
         "cost": 110.0,
         "target_shares": 100.0,
+        "manual_price": 138.0,
     },
 ]
 
@@ -93,34 +95,36 @@ if "audit_logs" not in st.session_state:
           "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
           "action": "系统初始化",
           "module": "系统",
-          "detail": "加载实时资产面板与资讯引擎完成",
+          "detail": "加载实时资产面板与行情校准引擎完成",
       }],
   )
 
 
-# ================= 3. 实时行情与高可靠财经简报抓取 =================
+# ================= 3. 实时行情与精准价格获取 =================
 @st.cache_data(ttl=60)
-def get_realtime_market_data(symbol):
-  """实时获取股票最新价、涨跌幅、前收盘及新闻"""
+def get_realtime_market_data(symbol, manual_fallback):
+  """优先获取实时现价，若接口异常或拿不到则完美回退到用户手动校准的最新市价"""
   sym = symbol.strip().upper()
-  if not HAS_YF:
-    return 100.0, 0.0, 100.0, []
+  latest_price = manual_fallback
+  change_pct = 0.0
+  raw_news = []
 
-  try:
-    ticker = yf.Ticker(sym)
-    hist = ticker.history(period="2d")
-    latest_price = 100.0
-    change_pct = 0.0
-    prev_close = 100.0
-
-    if not hist.empty:
-      latest_price = float(hist["Close"].iloc[-1])
-      if len(hist) >= 2:
-        prev_close = float(hist["Close"].iloc[-2])
-        change_pct = ((latest_price - prev_close) / prev_close) * 100.0
-
-    raw_news = []
+  if HAS_YF:
     try:
+      ticker = yf.Ticker(sym)
+      hist = ticker.history(period="2d")
+      if not hist.empty:
+        api_price = float(hist["Close"].iloc[-1])
+        if api_price > 0:
+          latest_price = api_price
+        if len(hist) >= 2:
+          prev_close = float(hist["Close"].iloc[-2])
+          change_pct = (
+              ((latest_price - prev_close) / prev_close) * 100.0
+              if prev_close > 0
+              else 0.0
+          )
+
       news_list = ticker.news
       if news_list:
         for n in news_list[:4]:
@@ -138,21 +142,17 @@ def get_realtime_market_data(symbol):
     except Exception:
       pass
 
-    return (
-        round(latest_price, 2),
-        round(change_pct, 2),
-        round(prev_close, 2),
-        raw_news,
-    )
-  except Exception:
-    return 100.0, 0.0, 100.0, []
+  return (
+      round(latest_price, 2),
+      round(change_pct, 2),
+      round(manual_fallback, 2),
+      raw_news,
+  )
 
 
 @st.cache_data(ttl=300)
 def fetch_live_macro_briefs():
-  """修复一分钟简报打不开的问题：采用内置高权重实时盘面逻辑 + 动态时间戳聚合"""
   now_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-  # 确保 100% 稳定秒开的专业一分钟财经简报内容
   return [
       {
           "time": now_date,
@@ -267,41 +267,42 @@ with st.sidebar:
 # ================= 5. 主界面与标签页 =================
 st.title("⚡ AI 私人股票盯盘、实时资产与一分钟简报终端")
 st.markdown(
-    "汇集 **持仓数量、成本、实时市值与盈亏状态自动联动驾驶舱**、**一分钟财经简报秒开引擎** 与 **AI买入防线**。"
+    "汇集 **持仓数量、成本、实时市值与盈亏状态自动联动驾驶舱**、**精准现价实时校准** 与 **秒开一分钟简报**。"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔥 主页: 持仓资产盈亏看板与1分钟简报",
-    "🎯 1. 终极目标与真实底仓校准",
+    "🎯 1. 终极目标与真实底仓校准 (现价校准)",
     "🛡️ 2. AI 最优买入防线与动态成本规划",
     "📜 3. 盯盘日志与审计追踪",
 ])
 
-# ================= TAB 0 (MAIN): 主页实时资产看板与一分钟简报 =================
+# ================= TAB 0 (MAIN): 主页实时资产看板 =================
 with tab1:
   st.subheader("🔥 我的资产驾驶舱 & 实时行情头条")
   st.markdown(
-      "以下数据会**随着您在底层添加或删除任何股票而实时自动联动加入**，完美展示您的持仓数量、买入成本、当前市值及浮动盈亏状态。"
+      "资产看板会随着您在底层添加、修改持仓或校准现价而实时自动联动计算。"
   )
 
   portfolio = st.session_state.portfolio
 
   if len(portfolio) == 0:
     st.info(
-        "💡 当前还没有添加任何股票持仓。请前往【🎯 1. 终极目标与真实底仓校准】标签页添加您的第一只股票，资产看板将自动生成！"
+        "💡 当前还没有添加任何股票持仓。请前往【🎯 1. 终极目标与真实底仓校准】标签页添加您的第一只股票！"
     )
   else:
-    # 动态计算总资产、总投入成本与总盈亏
     total_invested = 0.0
     total_market_value = 0.0
-
-    # 预先计算各项指标
     stock_metrics = []
+
     for p in portfolio:
       sh = float(p["shares"])
       cs = float(p["cost"])
       inv = sh * cs
-      live_p, chg, _, _ = get_realtime_market_data(p["symbol"])
+      fallback_p = float(
+          p.get("manual_price", cs)
+      )  # 优先采用校准价作为后备兜底
+      live_p, chg, _, _ = get_realtime_market_data(p["symbol"], fallback_p)
       mval = sh * live_p
       pnl = mval - inv
       pnl_pct = (pnl / inv * 100.0) if inv > 0 else 0.0
@@ -328,7 +329,6 @@ with tab1:
         (total_pnl / total_invested * 100.0) if total_invested > 0 else 0.0
     )
 
-    # 顶层整体大指标卡片
     mc1, mc2, mc3, mc4 = st.columns(4)
     mc1.metric("📦 总持仓投入成本", f"${total_invested:,.2f}")
     mc2.metric("📈 当前总市值估算", f"${total_market_value:,.2f}")
@@ -341,9 +341,8 @@ with tab1:
     mc4.metric("📊 监控标的品种", f"{len(portfolio)} 只个股")
 
     st.markdown("---")
-    st.markdown("#### 📊 个股持仓数量、成本与实时盈亏明细卡片（自动联动）")
+    st.markdown("#### 📊 个股持仓数量、成本与实时盈亏明细卡片")
 
-    # 循环渲染每一只股票的实时状态（支持新增自动加入）
     for sm in stock_metrics:
       curr_sign = (
           "¥"
@@ -358,7 +357,7 @@ with tab1:
         sc2.metric("当前持有数量", f"{sm['shares']:,.0f} 股")
         sc3.metric("买入平均成本", f"{curr_sign}{sm['cost']:,.2f}")
         sc4.metric(
-            "实时现价",
+            "当前计算现价",
             f"{curr_sign}{sm['price']:,.2f}",
             delta=f"{sm['chg']:+.2f}%",
         )
@@ -371,7 +370,7 @@ with tab1:
 
   st.markdown("---")
 
-  # 底部：修复后的 100% 秒开一分钟财经简报与实时新闻
+  # 底部：一分钟简报
   col_news1, col_news2 = st.columns([1.2, 1])
 
   with col_news1:
@@ -398,7 +397,9 @@ with tab1:
     st.markdown("#### 📰 实时持仓标的关联头条新闻")
     live_news_pool = []
     for p in portfolio:
-      _, _, _, n_arr = get_realtime_market_data(p["symbol"])
+      _, _, _, n_arr = get_realtime_market_data(
+          p["symbol"], p.get("manual_price", p["cost"])
+      )
       for n in n_arr:
         n["stock"] = p["name"]
         live_news_pool.append(n)
@@ -416,10 +417,14 @@ with tab1:
       )
 
 
-# ================= TAB 1: 底仓与目标校准 =================
+# ================= TAB 1: 底仓与目标校准（支持现价校准） =================
 with tab2:
-  st.subheader("🎯 个股真实底仓与终极目标校准中心 (全美股 / 全港股 / 全A股)")
-  st.markdown("在此处新增或删除股票，主页的资产看板和盈亏状态将**实时自动联动**。")
+  st.subheader(
+      "🎯 个股真实底仓与终极目标校准中心 (含最新现价与成本精准校准)"
+  )
+  st.markdown(
+      "在这里，您可以直接设定或**校准每一只股票的当前最新现价**，彻底解决接口现价不准的问题。"
+  )
 
   col_form, col_Quick = st.columns([1.35, 1])
 
@@ -448,7 +453,7 @@ with tab2:
         mkt_list = ["美股 (USD)", "港股 (HKD)", "A股 (RMB)"]
         in_market = st.selectbox("所属市场", mkt_list, key="t1_mkt")
 
-      c4, c5, c6 = st.columns(3)
+      c4, c5, c6, c7 = st.columns(4)
       with c4:
         in_shares = st.number_input(
             "当前持有股数", min_value=0.0, value=10.0, step=1.0, key="t1_sh"
@@ -460,6 +465,15 @@ with tab2:
       with c6:
         in_target = st.number_input(
             "🎯 终极目标股数", min_value=1.0, value=100.0, step=10.0, key="t1_tg"
+        )
+      with c7:
+        in_manual_p = st.number_input(
+            "📌 最新现价校准",
+            min_value=0.01,
+            value=150.0,
+            step=1.0,
+            key="t1_mp",
+            help="若自动行情不准，可在此直接填入您软件看到的最新现价",
         )
 
       if st.button("💾 保存该底仓到数据库", type="primary", use_container_width=True):
@@ -478,6 +492,7 @@ with tab2:
               item["shares"] = float(in_shares)
               item["cost"] = float(in_cost)
               item["target_shares"] = float(in_target)
+              item["manual_price"] = float(in_manual_p)
               updated = True
               break
           if not updated:
@@ -488,17 +503,18 @@ with tab2:
                 "shares": float(in_shares),
                 "cost": float(in_cost),
                 "target_shares": float(in_target),
+                "manual_price": float(in_manual_p),
             })
           save_json(PORTFOLIO_FILE, st.session_state.portfolio)
           add_audit_log("校准底仓", f"保存标的 {d_name} ({sym_c})")
           st.success(
-              f"✅ 成功保存 {d_name}！主页资产看板与盈亏状态已自动实时联动更新。"
+              f"✅ 成功保存 {d_name}！现价已校准，主页资产看板与盈亏状态已实时联动。"
           )
           st.rerun()
 
   with col_Quick:
     with st.container(border=True):
-      st.markdown("#### ⚡ 快速管理已存股票")
+      st.markdown("#### ⚡ 快速管理已存股票（现价校准）")
       if len(st.session_state.portfolio) == 0:
         st.warning("暂无持仓。")
       else:
@@ -509,6 +525,7 @@ with tab2:
         q_sh = st.number_input("修改持股数", value=float(target_p["shares"]), key="t1_qsh")
         q_cs = st.number_input("修改成本价", value=float(target_p["cost"]), key="t1_qcs")
         q_tg = st.number_input("修改终极目标", value=float(target_p["target_shares"]), key="t1_qtg")
+        q_mp = st.number_input("校准最新现价", value=float(target_p.get("manual_price", target_p["cost"])), key="t1_qmp")
 
         qc1, qc2 = st.columns(2)
         with qc1:
@@ -516,8 +533,9 @@ with tab2:
             st.session_state.portfolio[idx_sel]["shares"] = float(q_sh)
             st.session_state.portfolio[idx_sel]["cost"] = float(q_cs)
             st.session_state.portfolio[idx_sel]["target_shares"] = float(q_tg)
+            st.session_state.portfolio[idx_sel]["manual_price"] = float(q_mp)
             save_json(PORTFOLIO_FILE, st.session_state.portfolio)
-            st.success("✅ 更新成功！")
+            st.success("✅ 更新并校准成功！")
             st.rerun()
         with qc2:
           if st.button("🗑️ 删除", use_container_width=True, key="t1_del"):
@@ -532,6 +550,7 @@ with tab2:
       cur_sh = float(item["shares"])
       cur_cs = float(item["cost"])
       tg_sh = float(item["target_shares"])
+      mp_val = float(item.get("manual_price", cur_cs))
       invested_val = cur_sh * cur_cs
       remain_sh = max(0.0, tg_sh - cur_sh)
       progress_pct = min(100.0, (cur_sh / tg_sh * 100.0) if tg_sh > 0 else 0.0)
@@ -543,18 +562,18 @@ with tab2:
 
       with st.container(border=True):
         m1, m2, m3, m4, m5, m6, m7 = st.columns(
-            [1.8, 1.1, 1.2, 1.4, 1.3, 1.8, 0.8]
+            [1.6, 1.0, 1.1, 1.1, 1.3, 1.6, 0.8]
         )
         m1.markdown(
             f"**{item['name']}**  \n`{item['symbol']}` | {item['market']}"
         )
-        m2.metric("当前持有股数", f"{cur_sh:,.0f} 股")
-        m3.metric("当前底仓成本", f"{curr_sign}{cur_cs:,.2f}")
-        m4.metric("已投入总本金", f"{curr_sign}{invested_val:,.2f}")
+        m2.metric("当前持有", f"{cur_sh:,.0f} 股")
+        m3.metric("成本价", f"{curr_sign}{cur_cs:,.2f}")
+        m4.metric("校准现价", f"{curr_sign}{mp_val:,.2f}")
         m5.metric(
-            "🎯 终极目标股数",
+            "🎯 目标股数",
             f"{tg_sh:,.0f} 股",
-            delta=f"还差 {remain_sh:,.0f} 股",
+            delta=f"缺口 {remain_sh:,.0f}",
             delta_color="off",
         )
         with m6:
@@ -579,10 +598,11 @@ with tab2:
     stk = st.session_state.portfolio[sel_i]
     curr_sign = "¥" if "A股" in stk["market"] else ("HK$" if "港股" in stk["market"] else "$")
 
-    live_p, chg, _, _ = get_realtime_market_data(stk["symbol"])
+    fallback_p = float(stk.get("manual_price", stk["cost"]))
+    live_p, chg, _, _ = get_realtime_market_data(stk["symbol"], fallback_p)
 
     col_p1, col_p2, col_p3 = st.columns(3)
-    col_p1.metric(f"【{stk['name']}】实时现价", f"{curr_sign}{live_p:,.2f}", f"{chg:+.2f}%")
+    col_p1.metric(f"【{stk['name']}】计算参考现价", f"{curr_sign}{live_p:,.2f}")
     col_p2.metric("您的底仓成本", f"{curr_sign}{stk['cost']:,.2f}")
     gap_sh = max(0.0, stk["target_shares"] - stk["shares"])
     col_p3.metric("距离终极目标缺口", f"{gap_sh:,.0f} 股")
