@@ -32,8 +32,9 @@ if "avg_cost" not in st.session_state:
 if "last_check_date" not in st.session_state:
     st.session_state.last_check_date = datetime.now()
 if "audit_logs" not in st.session_state:
+    # 修复处的正确写法：使用 strftime
     st.session_state.audit_logs = [
-        f"【{datetime.now('%Y-%m-%d %H:%M')}】系统初始化档案：默认持有 10 股，成本均价 $120.0"
+        f"【{datetime.now().strftime('%Y-%m-%d %H:%M')}】系统初始化档案：默认持有 10 股，成本均价 $120.0"
     ]
 
 # ================= 微信推送函数 (Server酱) =================
@@ -52,7 +53,7 @@ def send_wechat_alert(sendkey, title, content):
 st.sidebar.title("🧭 私人 AI 投资管家")
 st.sidebar.markdown("稳态长线防线 · 桌面挂件模式")
 
-# 🖥️ 新增：桌面精简小窗口模式开关
+# 🖥️ 桌面精简小窗口模式开关
 is_mini_mode = st.sidebar.toggle("🖥️ 开启桌面精简小窗口模式", value=False, help="开启后页面将自动收缩为适合常驻桌面的极简挂件卡片")
 
 market_type = st.sidebar.radio("🌐 选择市场区域：", ["美股大盘与 AI 巨头", "A 股 AI 算力/产业链", "🔍 手动输入自定义代码"])
@@ -164,7 +165,7 @@ if is_mini_mode:
     </div>
     """, unsafe_allow_html=True)
     st.info("💡 提示：你可以把网页浏览器的窗口手动拖拽缩小，调整成一个长条状的小方块挂在电脑屏幕边缘，就变成了一个完美的桌面悬浮小窗口！")
-    st.stop()  # 开启精简模式时，只展示上面的精简挂件，不渲染下方冗长图表
+    st.stop()
 
 # ================= 正常完整模式渲染 =================
 st.title(f"📊 {ticker_symbol} 私人 AI 投研管家（稳态长线防线版）")
@@ -175,7 +176,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 计算达成目标后的预计最终成本
 current_total_cost = st.session_state.held_shares * st.session_state.avg_cost
 if shares_needed > 0:
     predicted_final_cost = (current_total_cost + (shares_needed * steady_base_price)) / target_total_shares
@@ -185,7 +185,7 @@ else:
 action_conclusion = (
     f"🟢 **当前挂单策略：** 现价（**${current_price:.2f}**）已进入稳态黄金买点防线区（**${optimal_buy_low} - ${optimal_buy_high}**），可以按计划执行吸纳！"
     if (shares_needed > 0 and current_price <= optimal_buy_high)
-    else f"🔴 **当前挂单策略：** 现价偏高，**请直接去券商 App 挂好长期限价单：${optimal_buy_low} - ${optimal_buy_high}**。让系统自动帮你守株待兔。"
+    else f"🔴 **当前挂单策略：** 现价偏高，<b>请直接去券商 App 挂好长期限价单：${optimal_buy_low} - ${optimal_buy_high}</b>。让系统自动帮你守株待兔。"
 )
 
 st.subheader("☕ 长期战略作战地图与懒人早报")
@@ -198,7 +198,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 筹码与成本精算面板
 st.subheader(f"🧮 {target_total_shares} 股长期稳态建仓指挥台")
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -210,14 +209,12 @@ with c3:
 with c4:
     st.metric("📉 达成目标后的预计均价", f"${predicted_final_cost:.2f}", f"当前成本 ${st.session_state.avg_cost}")
 
-# 审计日志
 with st.expander("📜 查看底仓变更与审计日志"):
     st.markdown("<div class='log-box'>", unsafe_allow_html=True)
     for log in st.session_state.audit_logs:
         st.write(log)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# K线走势与稳态防线图
 st.markdown("---")
 st.subheader("📈 股价走势与长线稳态防线区间（可用于挂单参考）")
 fig = go.Figure()
